@@ -8,12 +8,11 @@ import requests
 import re
 import string
 import secrets
-import gzip
-import hashlib
 import logging
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.error import Conflict, NetworkError
 import user_agent
 
 # ========================
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 # ========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID", "YOUR_CHAT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-railway-app.up.railway.app")
 PORT = int(os.getenv("PORT", 8443))
 
 # ========================
@@ -50,32 +48,91 @@ infoinsta = {}
 TOKEN_FILE = 'InstaTool_Token.txt'
 instatool_domain = '@gmail.com'
 lock = threading.Lock()
+updater = None
 
+logger.info("="*60)
+logger.info("🚀 ROHAN PAID BOT - RAILWAY.APP DEPLOYMENT")
+logger.info("="*60)
 logger.info("🚀 BOT INITIALIZED")
 logger.info(f"BOT_TOKEN: {BOT_TOKEN[:10]}...")
 logger.info(f"CHAT_ID: {CHAT_ID}")
 
 # ========================
-# TELEGRAM BOT SETUP
+# CLEAR TELEGRAM CONFLICTS
 # ========================
-def setup_updater():
-    global updater
+def clear_telegram_conflicts():
+    """Clear any existing webhooks or conflicts"""
     try:
-        updater = Updater(token=BOT_TOKEN, use_context=True)
-        dispatcher = updater.dispatcher
+        logger.info("🧹 Clearing Telegram conflicts...")
         
-        # Add command handlers
-        dispatcher.add_handler(CommandHandler("start", start_command))
-        dispatcher.add_handler(CommandHandler("stop", stop_command))
-        dispatcher.add_handler(CommandHandler("status", status_command))
-        dispatcher.add_handler(CommandHandler("help", help_command))
-        dispatcher.add_handler(CommandHandler("logs", logs_command))
+        # Delete webhook with drop_pending_updates=true
+        delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+        response = requests.get(delete_url, timeout=10)
         
-        logger.info("✅ Telegram Bot Setup Complete")
-        return updater
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('ok'):
+                logger.info("✅ Webhook deleted and pending updates dropped")
+            else:
+                logger.warning(f"⚠️ Webhook deletion response: {result}")
+        else:
+            logger.warning(f"⚠️ Failed to delete webhook: {response.status_code}")
+        
+        # Wait a moment for Telegram to process
+        time.sleep(2)
+        
+        return True
     except Exception as e:
-        logger.error(f"❌ Telegram Setup Error: {e}")
-        return None
+        logger.error(f"❌ Error clearing conflicts: {e}")
+        return False
+
+# ========================
+# TELEGRAM BOT SETUP WITH RETRY
+# ========================
+def setup_updater_with_retry(max_retries=5):
+    """Setup updater with automatic retry on conflicts"""
+    global updater
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🔄 Setting up Telegram updater (attempt {attempt + 1}/{max_retries})")
+            
+            # Clear conflicts first
+            clear_telegram_conflicts()
+            
+            # Create updater
+            updater = Updater(token=BOT_TOKEN, use_context=True)
+            dispatcher = updater.dispatcher
+            
+            # Add command handlers
+            dispatcher.add_handler(CommandHandler("start", start_command))
+            dispatcher.add_handler(CommandHandler("stop", stop_command))
+            dispatcher.add_handler(CommandHandler("status", status_command))
+            dispatcher.add_handler(CommandHandler("help", help_command))
+            dispatcher.add_handler(CommandHandler("logs", logs_command))
+            
+            logger.info("✅ Telegram Bot Setup Complete")
+            return updater
+            
+        except Conflict as e:
+            logger.warning(f"⚠️ Conflict on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 10  # 10, 20, 30, 40, 50 seconds
+                logger.info(f"⏰ Waiting {wait_time} seconds before retry...")
+                time.sleep(wait_time)
+            else:
+                logger.error("❌ Max retries reached for Telegram setup")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Telegram Setup Error (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                logger.error("❌ Max retries reached for Telegram setup")
+                return None
+    
+    return None
 
 # ========================
 # COMMAND HANDLERS
@@ -95,7 +152,7 @@ def start_command(update: Update, context: CallbackContext):
 🛑 Use /stop to stop the bot
 📈 Use /status to check stats
 
-🎯 **Running...**
+🎯 **Starting threads...**
     """, parse_mode='Markdown')
     
     logger.info(f"✅ Bot started by {update.effective_user.id}")
@@ -114,11 +171,12 @@ def status_command(update: Update, context: CallbackContext):
 ✅ Running: {is_running}
 📈 Total Hits: {total_hits}
 🎯 Good Instagram Emails: {good_ig}
-❌ Bad Emails: {bad_insta}
+❌ Bad Instagram: {bad_insta}
 📧 Bad Gmails: {bad_email}
 🔄 Current Hits: {hits}
 
 ⏰ Uptime: Running on Railway.app
+🚀 By: @ROHAN_DEAL_BOT
     """
     update.message.reply_text(status_text, parse_mode='Markdown')
 
@@ -129,7 +187,7 @@ def help_command(update: Update, context: CallbackContext):
 /start - Start the bot (runs 24/7)
 /stop - Stop the bot
 /status - Show bot stats
-/logs - Show last 20 log lines
+/logs - Show last 10 log lines
 /help - Show this message
 
 🎯 **Features:**
@@ -137,7 +195,8 @@ def help_command(update: Update, context: CallbackContext):
 ✅ Auto-restarts if crashes
 ✅ Sends hits to Telegram
 ✅ Auto-changes headers
-✅ Logs everything
+✅ Conflict prevention
+✅ Multi-threaded scraping
 
 BY ~ @ROHAN_DEAL_BOT
     """
@@ -147,7 +206,7 @@ def logs_command(update: Update, context: CallbackContext):
     try:
         with open('bot.log', 'r') as f:
             lines = f.readlines()
-        last_lines = ''.join(lines[-20:])
+        last_lines = ''.join(lines[-10:])  # Last 10 lines only
         update.message.reply_text(f"```\n{last_lines}\n```", parse_mode='Markdown')
     except:
         update.message.reply_text("❌ No logs available yet")
@@ -408,7 +467,7 @@ def instagram_scraper():
                 for email in emails:
                     check(email)
             
-            time.sleep(random.uniform(2, 5))
+            time.sleep(random.uniform(3, 7))  # Increased delay
             
         except Exception as e:
             logger.error(f"Instagram Scraper Error: {e}")
@@ -420,8 +479,8 @@ def instagram_scraper():
 def start_bot_threads():
     logger.info("📌 Starting Bot Threads...")
     
-    # Start multiple scraper threads
-    for i in range(5):  # 5 concurrent threads
+    # Start multiple scraper threads (reduced to prevent overload)
+    for i in range(3):  # 3 concurrent threads instead of 5
         thread = threading.Thread(target=instagram_scraper, daemon=True, name=f"Scraper-{i+1}")
         thread.start()
         logger.info(f"✅ Thread {i+1} started")
@@ -429,37 +488,48 @@ def start_bot_threads():
     time.sleep(1)
 
 # ========================
-# MAIN EXECUTION
+# MAIN EXECUTION WITH RETRY LOGIC
 # ========================
 def main():
-    logger.info("="*60)
-    logger.info("🚀 ROHAN PAID BOT - RAILWAY.APP DEPLOYMENT")
-    logger.info("="*60)
-    
-    # Generate initial token
     logger.info("🔑 Generating Google Token...")
     generate_google_token()
     
-    # Setup updater
-    updater = setup_updater()
+    # Setup updater with conflict handling
+    updater = setup_updater_with_retry()
     
     if not updater:
-        logger.error("❌ Failed to setup Telegram bot. Retrying...")
-        time.sleep(5)
-        return main()
+        logger.error("❌ Failed to setup Telegram bot after all retries. Exiting...")
+        sys.exit(1)
     
-    # Start polling
+    # Start polling with error handling
     try:
         logger.info("🚀 Starting Telegram Polling...")
-        updater.start_polling(poll_interval=1, timeout=10)
+        updater.start_polling(
+            poll_interval=2,  # Increased poll interval
+            timeout=20,       # Increased timeout
+            clean=True,       # Clean pending updates on start
+            allowed_updates=['message']  # Only message updates
+        )
         updater.idle()
+        
     except KeyboardInterrupt:
         logger.info("⚠️ Bot interrupted by user")
         updater.stop()
+        
+    except NetworkError as e:
+        logger.error(f"❌ Network Error: {e}")
+        time.sleep(30)
+        main()  # Restart
+        
+    except Conflict as e:
+        logger.error(f"❌ Conflict Error: {e}")
+        time.sleep(60)  # Wait longer for conflicts
+        main()  # Restart
+        
     except Exception as e:
         logger.error(f"❌ Main Error: {e}")
-        time.sleep(10)
-        main()
+        time.sleep(30)
+        main()  # Restart
 
 if __name__ == '__main__':
     main()
